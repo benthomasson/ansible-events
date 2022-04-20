@@ -8,7 +8,7 @@ import pytest
 
 from pprint import pprint
 
-from ansible_events.rules_parser import parse_rule_sets
+from ansible_events.rules_parser import parse_rule_sets, parse_state_machines
 from ansible_events.engine import run_rulesets, start_source
 from ansible_events.messages import Shutdown
 from ansible_events.rule_types import EventSource, EventSourceFilter
@@ -55,6 +55,23 @@ def load_rules(rules_file):
     return ruleset_queues, queue, event_log
 
 
+def load_state_machines(fsms_file):
+    os.chdir(HERE)
+    with open(fsms_file) as f:
+        data = yaml.safe_load(f.read())
+
+    fsms = parse_state_machines(data)
+    pprint(fsms)
+
+    fsm_queues = [(fsm, mp.Queue()) for fsm in fsms]
+
+    event_log = mp.Queue()
+
+    queue = fsm_queues[0][1]
+
+    return fsm_queues, queue, event_log
+
+
 def test_run_rulesets(new_event_loop):
 
     ruleset_queues, queue, event_log = load_rules("test_rules.yml")
@@ -70,6 +87,7 @@ def test_run_rulesets(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         dict(),
     )
@@ -96,6 +114,7 @@ def test_run_rules_with_assignment(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         dict(),
     )
@@ -117,6 +136,7 @@ def test_run_rules_with_assignment2(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         dict(),
     )
@@ -139,6 +159,7 @@ def test_run_rules_simple(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         dict(),
     )
@@ -165,6 +186,7 @@ def test_run_multiple_hosts(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         load_inventory('inventory1.yml'),
     )
@@ -196,6 +218,7 @@ def test_run_multiple_hosts2(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         load_inventory('inventory1.yml'),
     )
@@ -230,6 +253,7 @@ def test_run_multiple_hosts3(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         load_inventory('inventory.yml'),
     )
@@ -261,6 +285,7 @@ def test_filters(new_event_loop):
     run_rulesets(
         event_log,
         ruleset_queues,
+        [],
         dict(),
         dict(),
     )
@@ -270,3 +295,29 @@ def test_filters(new_event_loop):
     assert event_log.get()['type'] == 'ProcessedEvent', '2'
     assert event_log.get()['type'] == 'Shutdown', '3'
     assert event_log.empty()
+
+
+def test_states(new_event_loop):
+
+    fsm_queues, queue, event_log = load_state_machines('test_states.yml')
+
+
+    queue.put(dict(payload=dict(text="hello")))
+    queue.put(dict(payload=dict(text="goodbye")))
+    queue.put(Shutdown())
+
+    run_rulesets(
+        event_log,
+        [],
+        fsm_queues,
+        dict(),
+        dict(),
+    )
+
+    assert event_log.get()['type'] == 'ProcessedEvent', '0'
+    assert event_log.get()['type'] == 'ProcessedEvent', '1'
+    assert event_log.get()['type'] == 'Shutdown', '3'
+    assert event_log.empty()
+
+
+
