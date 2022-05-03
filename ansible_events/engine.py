@@ -20,6 +20,7 @@ from ansible_events.rule_types import (
     ActionContext,
 )
 from ansible_events.rules_parser import parse_hosts
+from ansible_events.hosts import get_host_id
 
 from typing import Optional, Dict, List, cast
 
@@ -75,6 +76,13 @@ def start_source(
         queue.put(Shutdown())
 
 
+def get_hosts_from_event(event):
+    if "meta" in event:
+        if "hosts" in event["meta"]:
+            return parse_hosts(event["meta"]["hosts"])
+    return []
+
+
 async def call_action(
     ruleset: str,
     action: str,
@@ -94,17 +102,14 @@ async def call_action(
             variables_copy = variables.copy()
             if c.m is not None:
                 variables_copy["event"] = c.m._d  # event data is stored in c.m._d
-                event = c.m._d  # event data is stored in c.m._d
-                if 'meta' in event:
-                    if 'hosts' in event['meta']:
-                        hosts = parse_hosts(event['meta']['hosts'])
+                hosts = get_hosts_from_event(c.m._d)
             else:
                 variables_copy["events"] = c._m
                 new_hosts = []
                 for event in variables_copy["events"]:
-                    if 'meta' in event:
-                        if 'hosts' in event['meta']:
-                            new_hosts.append(parse_hosts(event['meta']['hosts']))
+                    if "meta" in event:
+                        if "hosts" in event["meta"]:
+                            new_hosts.extend(parse_hosts(event["meta"]["hosts"]))
                 if new_hosts:
                     hosts = new_hosts
             logger.info(f"substitute_variables {action_args} {variables_copy}")
@@ -115,7 +120,6 @@ async def call_action(
             logger.info(action_args)
             if facts is None:
                 facts = durable.lang.get_facts(ruleset)
-            logger.info(f"facts: {durable.lang.get_facts(ruleset)}")
             if "ruleset" not in action_args:
                 action_args["ruleset"] = ruleset
             result = builtin_actions[action](
@@ -218,20 +222,56 @@ async def _run_rulesets_async(event_log: mp.Queue, rulesets_queue_plans, invento
             results = []
             try:
                 logger.info("Asserting event")
-                try:
-                    logger.debug(data)
-                    durable.lang.post(ruleset.name, data)
-                except durable.engine.MessageObservedException:
-                    logger.debug(f"MessageObservedException: {data}")
-                except durable.engine.MessageNotHandledException:
-                    logger.debug(f"MessageNotHandledException: {data}")
-                finally:
-                    logger.debug(durable.lang.get_pending_events(ruleset.name))
+                logger.debug(data)
+                found_hosts = None
+                if "meta" in data:
+                    if "hosts" in data["meta"]:
+                        found_hosts = parse_hosts(data["meta"]["hosts"])
+                if found_hosts:
+                    for host in found_hosts:
+                        data["sid"] = get_host_id(host)
+                        if "meta" not in data:
+                            data["meta"] = dict()
+                        data["meta"]["hosts"] = [host]
+                        try:
+                            durable.lang.post(ruleset.name, data)
+                        except durable.engine.MessageObservedException:
+                            logger.debug(f"MessageObservedException: {data}")
+                        except durable.engine.MessageNotHandledException:
+                            logger.debug(f"MessageNotHandledException: {data}")
+                else:
+                    try:
+                        durable.lang.post(ruleset.name, data)
+                    except durable.engine.MessageObservedException:
+                        logger.debug(f"MessageObservedException: {data}")
+                    except durable.engine.MessageNotHandledException:
+                        logger.debug(f"MessageNotHandledException: {data}")
                 while not plan.empty():
+                    run_last_item = True
                     item = cast(ActionContext, await plan.get())
                     logger.debug(item)
-                    result = await call_action(*item)
-                    results.append(result)
+                    # Combine run_playbook actions into one action with multiple hosts
+                    if item.action == "run_playbook":
+                        new_item = item._replace(hosts=[], facts={})
+                        logger.debug(f"Extending hosts")
+                        while item.action == "run_playbook":
+                            if "meta" in item.c.m._d:
+                                logger.debug(f"Adding hosts {item.c.m._d['meta']['hosts']}")
+                                new_item.c.m._d['meta']['hosts'].extend(item.c.m._d['meta']['hosts'])
+                            if plan.empty():
+                                run_last_item = False
+                                break
+                            item = cast(ActionContext, await plan.get())
+                            logger.debug(item)
+                        result = await call_action(*new_item)
+                        results.append(result)
+                        if run_last_item:
+                            result = await call_action(*item)
+                            results.append(result)
+                    # Run all other actions individually
+                    else:
+                        result = await call_action(*item)
+                        results.append(result)
 
                 event_log.put(dict(type="ProcessedEvent", results=results))
             except durable.engine.MessageNotHandledException:
