@@ -17,6 +17,11 @@ import dpath.util
 import yaml
 from durable import lang
 
+if os.environ.get("RULES_ENGINE", "durable_rules") == "drools":
+    from ansible_events.drools import lang
+else:
+    from durable import lang
+
 from .collection import find_playbook, has_playbook, split_collection_name
 from .conf import settings
 from .exception import ShutdownException
